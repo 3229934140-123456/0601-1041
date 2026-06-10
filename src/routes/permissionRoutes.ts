@@ -7,6 +7,8 @@ import {
   getUserPermissions,
   checkSpaceAccess,
   updateUserRole,
+  simulateSpaceAccess,
+  getInvitationAccessScope,
 } from '../controllers/permissionController';
 
 const router = Router();
@@ -15,6 +17,9 @@ router.use(protect);
 
 router.post('/space-access', checkSpaceAccess);
 router.get('/user/:userId', getUserPermissions);
+router.get('/invitation/:invitationId/scope', getInvitationAccessScope);
+
+router.post('/simulate', restrictTo('admin'), simulateSpaceAccess);
 
 router.use(restrictTo('admin', 'moderator'));
 

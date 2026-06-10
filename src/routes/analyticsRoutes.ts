@@ -9,6 +9,7 @@ import {
   getActivityTypes,
   getActivityTimeline,
   exportActivityLogs,
+  exportAuditReport,
 } from '../controllers/analyticsController';
 
 const router = Router();
@@ -22,6 +23,15 @@ router.get('/export', exportActivityLogs);
 router.get('/user/:userId/history', getUserActivityHistory);
 router.get('/heatmap', getSpaceHeatmap);
 router.get('/dashboard', getDashboardStats);
+
+router.post(
+  '/collaboration-summary/export',
+  restrictTo('admin', 'moderator'),
+  (req, _res, next) => { (req as any).exportMode = true; next(); },
+  generateCollaborationSummary,
+  exportAuditReport
+);
+
 router.post('/collaboration-summary', restrictTo('admin', 'moderator'), generateCollaborationSummary);
 
 export default router;

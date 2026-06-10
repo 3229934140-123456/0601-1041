@@ -257,3 +257,53 @@ export const updateUserRole = asyncHandler(async (req: Request, res: Response, n
 
   sendSuccess(res, { user: { _id: user._id, role: user.role, displayName: user.displayName } });
 });
+
+export const simulateSpaceAccess = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  if (req.user!.role !== 'admin') {
+    return next(new AppError('只有管理员可以使用模拟访问功能', 403));
+  }
+
+  const { targetUserId, spaceId, invitationId, checkInheritance = true } = req.body;
+
+  if (!targetUserId || !spaceId) {
+    return next(new AppError('请提供 targetUserId 和 spaceId', 400));
+  }
+
+  const SpaceAccessService = (await import('../services/SpaceAccessService')).default;
+
+  try {
+    const result = await SpaceAccessService.simulateAccess(
+      new mongoose.Types.ObjectId(targetUserId),
+      new mongoose.Types.ObjectId(spaceId),
+      { invitationId, checkInheritance }
+    );
+
+    sendSuccess(res, result);
+  } catch (err: any) {
+    return next(new AppError(err.message || '模拟访问失败', 400));
+  }
+});
+
+export const getInvitationAccessScope = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  if (req.user!.role !== 'admin' && req.user!.role !== 'moderator') {
+    return next(new AppError('只有管理员或协调员可以查询邀请码范围', 403));
+  }
+
+  const { invitationId } = req.params;
+
+  if (!invitationId) {
+    return next(new AppError('请提供 invitationId', 400));
+  }
+
+  const SpaceAccessService = (await import('../services/SpaceAccessService')).default;
+
+  try {
+    const result = await SpaceAccessService.getInvitationScope(
+      new mongoose.Types.ObjectId(invitationId)
+    );
+
+    sendSuccess(res, result);
+  } catch (err: any) {
+    return next(new AppError(err.message || '查询邀请码范围失败', 400));
+  }
+});

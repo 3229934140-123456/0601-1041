@@ -20,8 +20,8 @@ router.get('/unread-count', getUnreadCount);
 router.get('/missing', getMissingNotifications);
 router.post('/mark-all-read', markAllAsRead);
 router.post('/:id/read', markAsRead);
-router.delete('/:id', deleteNotification);
 router.delete('/clear/all', clearAllNotifications);
+router.delete('/:id', deleteNotification);
 
 router.post('/system', restrictTo('admin'), createSystemNotification);
 

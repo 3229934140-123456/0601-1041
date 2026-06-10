@@ -298,7 +298,7 @@ export const getDashboardStats = asyncHandler(async (req: Request, res: Response
 });
 
 export const generateCollaborationSummary = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-  const { userId, roomId, spaceId, from, to, includeDetails = false } = req.body;
+  const { userId, roomId, spaceId, floorId, from, to, includeDetails = false } = req.body;
 
   if (!from || !to) {
     return next(new AppError('请提供时间范围', 400));
@@ -307,33 +307,38 @@ export const generateCollaborationSummary = asyncHandler(async (req: Request, re
   const startDate = new Date(from as string);
   const endDate = new Date(to as string);
 
-  const query: any = {
+  const logQuery: any = {
     timestamp: { $gte: startDate, $lte: endDate },
   };
 
   if (userId) {
     const user = await User.findById(userId);
     if (!user) return next(new AppError('用户不存在', 404));
-    query.userId = new mongoose.Types.ObjectId(userId);
+    logQuery.userId = new mongoose.Types.ObjectId(userId);
   }
 
-  if (roomId || spaceId) {
-    const targetSpaceId = roomId || spaceId;
-    const space = await Space.findById(targetSpaceId);
-    if (!space) return next(new AppError('空间不存在', 404));
+  let scopeSpaceIds: mongoose.Types.ObjectId[] | null = null;
+  let scopeDescription = '';
 
-    const allRelatedSpaces = await Space.find({
+  if (floorId || spaceId || roomId) {
+    const targetId = floorId || spaceId || roomId;
+    const targetSpace = await Space.findById(targetId);
+    if (!targetSpace) return next(new AppError('空间不存在', 404));
+
+    const relatedSpaces = await Space.find({
       $or: [
-        { _id: new mongoose.Types.ObjectId(targetSpaceId) },
-        { spacePath: new mongoose.Types.ObjectId(targetSpaceId) },
-        { parentId: new mongoose.Types.ObjectId(targetSpaceId) },
+        { _id: new mongoose.Types.ObjectId(targetId) },
+        { spacePath: new mongoose.Types.ObjectId(targetId) },
+        { parentId: new mongoose.Types.ObjectId(targetId) },
       ],
-    }).select('_id');
-    const spaceIds = allRelatedSpaces.map((s) => s._id);
+    }).select('_id name type level');
 
-    query.$or = [
-      { spaceId: { $in: spaceIds } },
-      { roomId: { $in: spaceIds } },
+    scopeSpaceIds = relatedSpaces.map((s) => s._id);
+    scopeDescription = `${targetSpace.type === 'floor' ? '楼层' : targetSpace.type === 'room' ? '房间' : '区域'}: ${targetSpace.name}`;
+
+    logQuery.$or = [
+      { spaceId: { $in: scopeSpaceIds } },
+      { roomId: { $in: scopeSpaceIds } },
     ];
   }
 
@@ -347,21 +352,21 @@ export const generateCollaborationSummary = asyncHandler(async (req: Request, re
     voiceRoomStats,
     fileUploadStats,
   ] = await Promise.all([
-    ActivityLog.find(query)
+    ActivityLog.find(logQuery)
       .populate('userId', 'displayName avatar')
       .sort({ timestamp: 1 }),
     ActivityLog.aggregate([
-      { $match: query },
+      { $match: logQuery },
       { $group: { _id: '$userId', count: { $sum: 1 }, types: { $addToSet: '$type' } } },
       { $sort: { count: -1 } },
     ]),
     ActivityLog.aggregate([
-      { $match: { ...query, roomId: { $exists: true } } },
+      { $match: { ...logQuery, roomId: { $exists: true } } },
       { $group: { _id: '$roomId', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
     ]),
     ActivityLog.aggregate([
-      { $match: query },
+      { $match: logQuery },
       { $group: { _id: '$type', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
     ]),
@@ -371,12 +376,19 @@ export const generateCollaborationSummary = asyncHandler(async (req: Request, re
         { scheduledEnd: { $gte: startDate, $lte: endDate } },
         { actualStart: { $gte: startDate, $lte: endDate } },
       ],
+      ...(scopeSpaceIds ? { roomId: { $in: scopeSpaceIds } } : {}),
     })
       .populate('organizerId', 'displayName avatar')
       .populate('roomId', 'name')
       .sort({ scheduledStart: 1 }),
     ActivityLog.aggregate([
-      { $match: { ...query, entityType: 'whiteboard' } },
+      {
+        $match: {
+          ...logQuery,
+          entityType: 'whiteboard',
+          ...(scopeSpaceIds ? { roomId: { $in: scopeSpaceIds } } : {}),
+        },
+      },
       {
         $group: {
           _id: '$entityId',
@@ -392,7 +404,13 @@ export const generateCollaborationSummary = asyncHandler(async (req: Request, re
       { $limit: 10 },
     ]),
     ActivityLog.aggregate([
-      { $match: { ...query, entityType: 'voice_room' } },
+      {
+        $match: {
+          ...logQuery,
+          entityType: 'voice_room',
+          ...(scopeSpaceIds ? { roomId: { $in: scopeSpaceIds } } : {}),
+        },
+      },
       {
         $group: {
           _id: '$entityId',
@@ -407,7 +425,13 @@ export const generateCollaborationSummary = asyncHandler(async (req: Request, re
       { $limit: 10 },
     ]),
     ActivityLog.aggregate([
-      { $match: { ...query, type: 'file_upload' } },
+      {
+        $match: {
+          ...logQuery,
+          type: 'file_upload',
+          ...(scopeSpaceIds ? { roomId: { $in: scopeSpaceIds } } : {}),
+        },
+      },
       {
         $group: {
           _id: null,
@@ -483,6 +507,7 @@ export const generateCollaborationSummary = asyncHandler(async (req: Request, re
   const totalUploaders = fileUploadStats[0]?.uploaders?.length || 0;
 
   const summary = [
+    `【统计范围】${scopeDescription || '全部空间'}`,
     `【协作周期】${startDate.toLocaleDateString('zh-CN')} ~ ${endDate.toLocaleDateString('zh-CN')} (共 ${days} 天)`,
     `【总体活跃】总活动 ${totalActivities} 次，日均 ${avgDaily} 次`,
     `【参与人员】${uniqueUsers} 位用户参与协作`,
@@ -523,9 +548,16 @@ export const generateCollaborationSummary = asyncHandler(async (req: Request, re
     participantCount: m.attendees?.length || 0,
   }));
 
-  sendSuccess(res, {
+  const responseData = {
     summary,
     period: { from: startDate, to: endDate, days },
+    scope: {
+      floorId: floorId || null,
+      roomId: roomId || null,
+      spaceId: spaceId || null,
+      userId: userId || null,
+      description: scopeDescription || null,
+    },
     stats: {
       totalActivities,
       uniqueUsers,
@@ -556,7 +588,18 @@ export const generateCollaborationSummary = asyncHandler(async (req: Request, re
     meetings,
     timeline,
     meetingTimeline,
-  });
+  };
+
+  (req as any).auditReportData = responseData;
+  (req as any).filterParams = {
+    userId, roomId, spaceId, floorId, from, to, includeDetails,
+  };
+
+  if ((req as any).exportMode) {
+    return next();
+  }
+
+  sendSuccess(res, responseData);
 });
 
 export const getActivityTimeline = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
@@ -788,6 +831,108 @@ export const exportActivityLogs = asyncHandler(async (req: Request, res: Respons
 
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="activity-logs-${Date.now()}.json"`);
+  res.json(exportData);
+});
+
+export const exportAuditReport = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  const { format = 'json' } = req.query;
+
+  const auditReportData = (req as any).auditReportData;
+  const filterParams = (req as any).filterParams;
+
+  if (!auditReportData) {
+    return next(new AppError('请先生成协作摘要', 400));
+  }
+
+  const { summary, period, scope, stats, meetings, timeline } = auditReportData;
+  const { from, to } = filterParams || {};
+  const fromDate = from ? new Date(from) : period?.from;
+  const toDate = to ? new Date(to) : period?.to;
+
+  if (format === 'csv') {
+    const headers = [
+      '时间', '类型', '用户', '实体类型', '实体ID',
+      '楼层ID', '房间ID', '区域ID', '描述', '元数据'
+    ];
+
+    const rows: any[][] = [];
+
+    rows.push([`# 审计报表摘要`, '', '', '', '', '', '', '', '', '']);
+    rows.push([`# 统计范围: ${scope?.description || '全部空间'}`, '', '', '', '', '', '', '', '', '']);
+    rows.push([`# 时间范围: ${fromDate?.toLocaleString()} ~ ${toDate?.toLocaleString()}`, '', '', '', '', '', '', '', '', '']);
+    rows.push([`# 总活动数: ${stats?.totalActivities}`, '', '', '', '', '', '', '', '', '']);
+    rows.push([`# 参与人数: ${stats?.uniqueUsers}`, '', '', '', '', '', '', '', '', '']);
+    rows.push([`# 会议数: ${stats?.meetings?.count} (${stats?.meetings?.totalMinutes}分钟)`, '', '', '', '', '', '', '', '', '']);
+    rows.push([`# 白板更新: ${stats?.whiteboards?.totalUpdates}次`, '', '', '', '', '', '', '', '', '']);
+    rows.push([`# 语音加入: ${stats?.voiceRooms?.totalJoins}次`, '', '', '', '', '', '', '', '', '']);
+    rows.push([`# 文件上传: ${stats?.files?.totalUploads}次`, '', '', '', '', '', '', '', '', '']);
+    rows.push(['', '', '', '', '', '', '', '', '', '']);
+
+    rows.push(headers);
+
+    for (const log of timeline || []) {
+      const metadataStr = log.metadata ? JSON.stringify(log.metadata).replace(/"/g, '""') : '';
+      rows.push([
+        log.timestamp?.toISOString() || '',
+        log.type || '',
+        log.userName || '',
+        log.entityType || '',
+        log.entityId?.toString() || '',
+        scope?.floorId || '',
+        log.roomId?.toString() || '',
+        log.spaceId?.toString() || '',
+        (log.description || '').replace(/"/g, '""').replace(/\n/g, ' '),
+        metadataStr,
+      ]);
+    }
+
+    const csv = rows.map((row) => row.map((cell) => `"${cell}"`).join(',')).join('\n');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="audit-report-${Date.now()}.csv"`);
+    res.send('\uFEFF' + csv);
+    return;
+  }
+
+  const exportData = {
+    exportTime: new Date().toISOString(),
+    exportType: 'audit_report',
+    period: { from: fromDate, to: toDate },
+    scope,
+    filters: filterParams,
+    summary: {
+      textSummary: summary,
+      stats,
+    },
+    meetings: meetings?.map((m: any) => ({
+      id: m._id,
+      title: m.title,
+      status: m.status,
+      scheduledStart: m.scheduledStart,
+      scheduledEnd: m.scheduledEnd,
+      actualStart: m.actualStart,
+      actualEnd: m.actualEnd,
+      organizer: m.organizerId?.displayName,
+      room: m.roomId?.name,
+      participantCount: m.attendees?.length || 0,
+    })) || [],
+    timeline: timeline?.map((log: any) => ({
+      id: log.id,
+      timestamp: log.timestamp,
+      type: log.type,
+      entityType: log.entityType,
+      entityId: log.entityId,
+      userId: log.userId,
+      userName: log.userName,
+      roomId: log.roomId,
+      spaceId: log.spaceId,
+      description: log.description,
+      metadata: log.metadata,
+    })) || [],
+  };
+
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="audit-report-${Date.now()}.json"`);
   res.json(exportData);
 });
 

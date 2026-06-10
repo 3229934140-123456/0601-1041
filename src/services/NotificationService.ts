@@ -15,10 +15,46 @@ export interface CreateNotificationParams {
   actorUserId?: mongoose.Types.ObjectId | string;
   actionUrl?: string;
   metadata?: Record<string, any>;
+  dedupKey?: string;
+  dedupWindowMinutes?: number;
 }
 
 class NotificationService {
-  static async create(params: CreateNotificationParams): Promise<INotification> {
+  private static async checkDuplicate(
+    params: CreateNotificationParams
+  ): Promise<boolean> {
+    if (!params.dedupKey && !params.entityId) return false;
+
+    const dedupWindowMinutes = params.dedupWindowMinutes || 5;
+    const cutoffTime = new Date(Date.now() - dedupWindowMinutes * 60 * 1000);
+
+    const query: any = {
+      userId: typeof params.userId === 'string'
+        ? new mongoose.Types.ObjectId(params.userId)
+        : params.userId,
+      type: params.type,
+      createdAt: { $gte: cutoffTime },
+      isRead: false,
+    };
+
+    if (params.dedupKey) {
+      query['metadata.dedupKey'] = params.dedupKey;
+    } else if (params.entityId) {
+      query.entityId = typeof params.entityId === 'string'
+        ? new mongoose.Types.ObjectId(params.entityId)
+        : params.entityId;
+    }
+
+    const existing = await Notification.findOne(query);
+    return !!existing;
+  }
+
+  static async create(params: CreateNotificationParams): Promise<INotification | null> {
+    const isDuplicate = await this.checkDuplicate(params);
+    if (isDuplicate) {
+      return null;
+    }
+
     const notification = new Notification({
       userId: typeof params.userId === 'string'
         ? new mongoose.Types.ObjectId(params.userId)
@@ -49,11 +85,13 @@ class NotificationService {
           : params.actorUserId
         : undefined,
       actionUrl: params.actionUrl,
-      metadata: params.metadata,
+      metadata: params.dedupKey
+        ? { ...params.metadata, dedupKey: params.dedupKey }
+        : params.metadata,
     });
 
     await notification.save();
-    this.pushToUser(notification);
+    await this.pushToUser(notification);
 
     return notification;
   }
@@ -65,24 +103,32 @@ class NotificationService {
     const now = new Date();
 
     for (const userId of params.userIds) {
+      const isDuplicate = await this.checkDuplicate({ ...params, userId });
+      if (isDuplicate) continue;
+
       const notification = new Notification({
         ...params,
         userId: typeof userId === 'string' ? new mongoose.Types.ObjectId(userId) : userId,
         createdAt: now,
+        metadata: params.dedupKey
+          ? { ...params.metadata, dedupKey: params.dedupKey }
+          : params.metadata,
       });
       notifications.push(notification);
     }
 
+    if (notifications.length === 0) return [];
+
     const saved = await Notification.insertMany(notifications);
 
     for (const n of saved) {
-      this.pushToUser(n);
+      await this.pushToUser(n);
     }
 
     return saved;
   }
 
-  private static pushToUser(notification: INotification): void {
+  private static async pushToUser(notification: INotification): Promise<void> {
     try {
       const userId = notification.userId.toString();
       const online = onlineUsers.get(userId);
@@ -100,8 +146,10 @@ class NotificationService {
           metadata: notification.metadata,
           createdAt: notification.createdAt,
         });
+
+        const unreadCount = await this.getUnreadCount(notification.userId);
         io.to(online.socketId).emit('notification:unread-count', {
-          unreadCount: -1,
+          unreadCount,
         });
       }
     } catch (_e) {

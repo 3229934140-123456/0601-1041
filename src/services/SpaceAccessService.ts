@@ -9,22 +9,89 @@ export interface AccessCheckResult {
   matchedSpaceId?: mongoose.Types.ObjectId;
   matchedSpaceName?: string;
   matchedRule?: string;
-  chain?: {
-    spaceId: mongoose.Types.ObjectId;
-    spaceName: string;
-    spaceType: string;
-    isPublic: boolean;
-    hasRoleAccess: boolean;
-    hasUserAccess: boolean;
-    hasUserGrant: boolean;
-  }[];
+  chain?: ChainNode[];
   invitationId?: mongoose.Types.ObjectId;
+}
+
+export interface ChainNode {
+  spaceId: mongoose.Types.ObjectId;
+  spaceName: string;
+  spaceType: string;
+  isPublic: boolean;
+  hasRoleAccess: boolean;
+  hasUserAccess: boolean;
+  hasUserGrant: boolean;
+  result: 'allowed' | 'denied' | 'inherited_allowed';
+  reason: string;
+  checkedRules: {
+    rule: string;
+    passed: boolean;
+    detail: string;
+  }[];
 }
 
 export interface AccessCheckOptions {
   checkInheritance?: boolean;
   invitationId?: string;
   adminViewMode?: boolean;
+}
+
+export interface SimulateAccessResult {
+  simulatedUser: {
+    id: mongoose.Types.ObjectId;
+    name: string;
+    email: string;
+    role: string;
+  };
+  targetSpace: {
+    id: mongoose.Types.ObjectId;
+    name: string;
+    type: string;
+  };
+  finalResult: AccessCheckResult;
+  detailedChain: ChainNode[];
+  spacePath: {
+    id: mongoose.Types.ObjectId;
+    name: string;
+    type: string;
+  }[];
+  accessibleAreas: {
+    spaceId: mongoose.Types.ObjectId;
+    spaceName: string;
+    spaceType: string;
+    access: boolean;
+  }[];
+  suggestions: string[];
+}
+
+export interface InvitationScopeResult {
+  invitation: {
+    id: mongoose.Types.ObjectId;
+    code: string;
+    type: string;
+    status: string;
+    expiresAt: Date;
+    inviteeEmail?: string;
+    inviteeName?: string;
+    createdByName?: string;
+  };
+  directlyAllowedSpaces: {
+    id: mongoose.Types.ObjectId;
+    name: string;
+    type: string;
+    level: number;
+  }[];
+  inheritedAllowedSpaces: {
+    id: mongoose.Types.ObjectId;
+    name: string;
+    type: string;
+    level: number;
+    inheritedFrom: mongoose.Types.ObjectId;
+    inheritedFromName: string;
+  }[];
+  allAllowedSpaceIds: mongoose.Types.ObjectId[];
+  totalAllowed: number;
+  scopeDescription: string;
 }
 
 class SpaceAccessService {
@@ -34,7 +101,6 @@ class SpaceAccessService {
     options: AccessCheckOptions = {}
   ): Promise<AccessCheckResult> {
     const { checkInheritance = true, invitationId, adminViewMode = false } = options;
-    const chain: AccessCheckResult['chain'] = [];
 
     const spacesToCheck: ISpace[] = [];
     if (checkInheritance && space.spacePath && space.spacePath.length > 0) {
@@ -46,6 +112,35 @@ class SpaceAccessService {
       spacesToCheck.push(space);
     }
 
+    let invitationInfo: {
+      allowedSpaceIds: string[];
+      isGuest: boolean;
+      isInvitationValid: boolean;
+      invitationId?: mongoose.Types.ObjectId;
+    } | null = null;
+
+    if (invitationId && user.role === 'guest') {
+      const Invitation = (await import('../models/Invitation')).default;
+      const invitation = await Invitation.findById(invitationId);
+      if (invitation &&
+        (invitation.status === 'pending' || invitation.status === 'accepted') &&
+        invitation.type === 'guest' &&
+        new Date() < invitation.expiresAt) {
+        invitationInfo = {
+          allowedSpaceIds: (invitation.allowedSpaces || []).map((id) => id.toString()),
+          isGuest: true,
+          isInvitationValid: true,
+          invitationId: invitation._id,
+        };
+      } else {
+        invitationInfo = {
+          allowedSpaceIds: [],
+          isGuest: true,
+          isInvitationValid: false,
+        };
+      }
+    }
+
     if (adminViewMode) {
       if (user.role === 'admin') {
         return {
@@ -54,7 +149,7 @@ class SpaceAccessService {
           level: 'admin',
           matchedSpaceId: space._id,
           matchedSpaceName: space.name,
-          chain: this._buildChain(spacesToCheck, user),
+          chain: this._buildChain(spacesToCheck, user, invitationInfo || undefined),
         };
       }
       if (user.role === 'moderator') {
@@ -64,7 +159,7 @@ class SpaceAccessService {
           level: 'moderator',
           matchedSpaceId: space._id,
           matchedSpaceName: space.name,
-          chain: this._buildChain(spacesToCheck, user),
+          chain: this._buildChain(spacesToCheck, user, invitationInfo || undefined),
         };
       }
     } else {
@@ -75,7 +170,7 @@ class SpaceAccessService {
           level: 'admin',
           matchedSpaceId: space._id,
           matchedSpaceName: space.name,
-          chain: this._buildChain(spacesToCheck, user),
+          chain: this._buildChain(spacesToCheck, user, invitationInfo || undefined),
         };
       }
       if (user.role === 'moderator') {
@@ -85,36 +180,30 @@ class SpaceAccessService {
           level: 'moderator',
           matchedSpaceId: space._id,
           matchedSpaceName: space.name,
-          chain: this._buildChain(spacesToCheck, user),
+          chain: this._buildChain(spacesToCheck, user, invitationInfo || undefined),
         };
       }
     }
 
-    if (invitationId && user.role === 'guest') {
-      const Invitation = (await import('../models/Invitation')).default;
-      const invitation = await Invitation.findById(invitationId);
-      if (invitation && (invitation.status === 'pending' || invitation.status === 'accepted') && invitation.type === 'guest' && new Date() < invitation.expiresAt) {
-        const allowedSpaceIds = (invitation.allowedSpaces || []).map((id) => id.toString());
-        const targetInAllowed = allowedSpaceIds.includes(space._id.toString());
+    if (invitationInfo) {
+      const targetInAllowed = invitationInfo.allowedSpaceIds.includes(space._id.toString());
+      let parentInAllowed = false;
+      if (checkInheritance && space.spacePath) {
+        parentInAllowed = space.spacePath.some(
+          (pid) => invitationInfo!.allowedSpaceIds.includes(pid.toString())
+        );
+      }
 
-        let parentInAllowed = false;
-        if (checkInheritance && space.spacePath) {
-          parentInAllowed = space.spacePath.some(
-            (pid) => allowedSpaceIds.includes(pid.toString())
-          );
-        }
-
-        if (targetInAllowed || parentInAllowed) {
-          return {
-            access: true,
-            reason: '访客邀请授权访问',
-            level: 'invitation',
-            matchedSpaceId: space._id,
-            matchedSpaceName: space.name,
-            invitationId: invitation._id,
-            chain: this._buildChain(spacesToCheck, user),
-          };
-        }
+      if (targetInAllowed || parentInAllowed) {
+        return {
+          access: true,
+          reason: '访客邀请授权访问',
+          level: 'invitation',
+          matchedSpaceId: space._id,
+          matchedSpaceName: space.name,
+          invitationId: invitationInfo.invitationId,
+          chain: this._buildChain(spacesToCheck, user, invitationInfo),
+        };
       }
     }
 
@@ -125,7 +214,7 @@ class SpaceAccessService {
           ...result,
           matchedSpaceId: s._id,
           matchedSpaceName: s.name,
-          chain: this._buildChain(spacesToCheck, user),
+          chain: this._buildChain(spacesToCheck, user, invitationInfo || undefined),
           level: s._id.toString() === space._id.toString() ? result.level : 'parent_inherited',
           reason: s._id.toString() === space._id.toString()
             ? result.reason
@@ -140,7 +229,7 @@ class SpaceAccessService {
       level: 'denied',
       matchedSpaceId: space._id,
       matchedSpaceName: space.name,
-      chain: this._buildChain(spacesToCheck, user),
+      chain: this._buildChain(spacesToCheck, user, invitationInfo || undefined),
     };
   }
 
@@ -179,8 +268,13 @@ class SpaceAccessService {
 
   private static _buildChain(
     spaces: ISpace[],
-    user: IUser & { _id: mongoose.Types.ObjectId }
-  ): AccessCheckResult['chain'] {
+    user: IUser & { _id: mongoose.Types.ObjectId },
+    invitation?: {
+      allowedSpaceIds: string[];
+      isGuest: boolean;
+      isInvitationValid: boolean;
+    }
+  ): ChainNode[] {
     return spaces.map((s) => {
       const hasRoleAccess = !!(
         s.allowedRoles &&
@@ -198,6 +292,80 @@ class SpaceAccessService {
         user.allowedSpaces.some((sp) => sp.toString() === s._id.toString())
       );
 
+      const hasInvitationAccess = !!(
+        invitation?.isInvitationValid &&
+        invitation?.isGuest &&
+        invitation?.allowedSpaceIds.includes(s._id.toString())
+      );
+
+      const checkedRules: ChainNode['checkedRules'] = [];
+
+      checkedRules.push({
+        rule: '空间公开',
+        passed: s.isPublic,
+        detail: s.isPublic ? '空间设为公开，所有人可访问' : '空间为私有，需要授权',
+      });
+
+      checkedRules.push({
+        rule: '角色白名单',
+        passed: hasRoleAccess,
+        detail: hasRoleAccess
+          ? `角色「${user.role}」在空间角色白名单中`
+          : s.allowedRoles?.length
+            ? `空间角色白名单为 ${s.allowedRoles.join('、')}，不包含您的角色「${user.role}」`
+            : '未设置角色白名单',
+      });
+
+      checkedRules.push({
+        rule: '用户白名单',
+        passed: hasUserAccess,
+        detail: hasUserAccess
+          ? '您的用户ID在空间用户白名单中'
+          : s.allowedUsers?.length
+            ? '空间用户白名单不包含您的用户ID'
+            : '未设置用户白名单',
+      });
+
+      checkedRules.push({
+        rule: '管理员单独授权',
+        passed: hasUserGrant,
+        detail: hasUserGrant
+          ? '管理员为您单独授权了此空间'
+          : user.allowedSpaces?.length
+            ? '您的单独授权列表中无此空间'
+            : '未设置单独授权',
+      });
+
+      if (invitation) {
+        checkedRules.push({
+          rule: '访客邀请',
+          passed: hasInvitationAccess,
+          detail: hasInvitationAccess
+            ? '访客邀请码包含此空间的访问权限'
+            : invitation.isInvitationValid
+              ? '访客邀请码的允许范围不包含此空间'
+              : '访客邀请码无效或已过期',
+        });
+      }
+
+      const singleResult = this._checkSingleSpace(user, s);
+      let result: ChainNode['result'] = 'denied';
+      let reason = '无匹配的放行规则';
+
+      if (user.role === 'admin') {
+        result = 'allowed';
+        reason = '管理员特权，自动放行';
+      } else if (user.role === 'moderator') {
+        result = 'allowed';
+        reason = '协调员权限，自动放行';
+      } else if (hasInvitationAccess) {
+        result = 'allowed';
+        reason = '访客邀请授权，放行';
+      } else if (singleResult.access) {
+        result = 'allowed';
+        reason = singleResult.reason;
+      }
+
       return {
         spaceId: s._id,
         spaceName: s.name,
@@ -206,6 +374,9 @@ class SpaceAccessService {
         hasRoleAccess,
         hasUserAccess,
         hasUserGrant,
+        result,
+        reason,
+        checkedRules,
       };
     });
   }
@@ -275,11 +446,205 @@ class SpaceAccessService {
         if (node.hasUserGrant) flags.push('用户授权通过');
 
         const flagStr = flags.length > 0 ? flags.join('、') : '无匹配规则';
-        parts.push(`  · ${node.spaceName} (${node.spaceType}): ${flagStr}`);
+        parts.push(`  · ${node.spaceName} (${node.spaceType}): ${flagStr} - ${node.reason}`);
       }
     }
 
     return parts.join('');
+  }
+
+  static async simulateAccess(
+    targetUserId: mongoose.Types.ObjectId,
+    spaceId: mongoose.Types.ObjectId,
+    options: { invitationId?: string; checkInheritance?: boolean } = {}
+  ): Promise<SimulateAccessResult> {
+    const User = (await import('../models/User')).default;
+
+    const user = await User.findById(targetUserId);
+    if (!user) {
+      throw new Error('模拟用户不存在');
+    }
+
+    const space = await Space.findById(spaceId);
+    if (!space) {
+      throw new Error('目标空间不存在');
+    }
+
+    const finalResult = await this.checkAccess(user as any, space, options);
+
+    const spacesToCheck: ISpace[] = [];
+    if (options.checkInheritance !== false && space.spacePath && space.spacePath.length > 0) {
+      const parentSpaces = await Space.find({
+        _id: { $in: space.spacePath },
+      }).sort({ level: 1 });
+      spacesToCheck.push(...parentSpaces, space);
+    } else {
+      spacesToCheck.push(space);
+    }
+
+    const spacePath = spacesToCheck.map((s) => ({
+      id: s._id,
+      name: s.name,
+      type: s.type,
+    }));
+
+    const accessibleAreas = [];
+    for (const s of spacesToCheck) {
+      const r = await this.checkAccess(user as any, s, { checkInheritance: false });
+      accessibleAreas.push({
+        spaceId: s._id,
+        spaceName: s.name,
+        spaceType: s.type,
+        access: r.access,
+      });
+    }
+
+    const suggestions: string[] = [];
+    if (!finalResult.access) {
+      if (user.role === 'guest' && !options.invitationId) {
+        suggestions.push('访客需要邀请码才能访问，请提供有效的访客邀请码');
+      }
+      if (finalResult.chain) {
+        const deniedNodes = finalResult.chain.filter((n) => n.result === 'denied');
+        for (const node of deniedNodes) {
+          if (!node.isPublic) {
+            suggestions.push(`空间「${node.spaceName}」为私有空间，可考虑：1) 设为公开 2) 将用户角色添加到角色白名单 3) 将用户添加到用户白名单 4) 为用户单独授权`);
+          }
+          if (!node.hasRoleAccess) {
+            suggestions.push(`用户角色「${user.role}」不在空间「${node.spaceName}」的角色白名单中`);
+          }
+          if (!node.hasUserAccess && !node.hasUserGrant) {
+            suggestions.push(`用户不在空间「${node.spaceName}」的用户白名单中，也没有单独授权`);
+          }
+        }
+      }
+    }
+
+    return {
+      simulatedUser: {
+        id: user._id,
+        name: user.displayName,
+        email: user.email,
+        role: user.role,
+      },
+      targetSpace: {
+        id: space._id,
+        name: space.name,
+        type: space.type,
+      },
+      finalResult,
+      detailedChain: finalResult.chain || [],
+      spacePath,
+      accessibleAreas,
+      suggestions: [...new Set(suggestions)].slice(0, 5),
+    };
+  }
+
+  static async getInvitationScope(
+    invitationId: mongoose.Types.ObjectId
+  ): Promise<InvitationScopeResult> {
+    const Invitation = (await import('../models/Invitation')).default;
+    const User = (await import('../models/User')).default;
+
+    const invitation = await Invitation.findById(invitationId);
+    if (!invitation) {
+      throw new Error('邀请码不存在');
+    }
+
+    let creator: any = null;
+    if (invitation.inviterId) {
+      creator = await User.findById(invitation.inviterId).select('displayName');
+    }
+
+    const directlyAllowedSpaceIds = invitation.allowedSpaces || [];
+    const directlyAllowedSpaces = await Space.find({
+      _id: { $in: directlyAllowedSpaceIds },
+      isActive: true,
+    }).select('name type level').sort({ level: 1, sortOrder: 1 });
+
+    const inheritedAllowedSpaces: InvitationScopeResult['inheritedAllowedSpaces'] = [];
+    const allAllowedSpaceIds = new Set<string>();
+
+    for (const allowedSpace of directlyAllowedSpaces) {
+      allAllowedSpaceIds.add(allowedSpace._id.toString());
+
+      const childSpaces = await Space.find({
+        spacePath: allowedSpace._id,
+        isActive: true,
+      }).select('name type level parentId');
+
+      for (const child of childSpaces) {
+        if (!allAllowedSpaceIds.has(child._id.toString())) {
+          allAllowedSpaceIds.add(child._id.toString());
+          inheritedAllowedSpaces.push({
+            id: child._id,
+            name: child.name,
+            type: child.type,
+            level: child.level,
+            inheritedFrom: allowedSpace._id,
+            inheritedFromName: allowedSpace.name,
+          });
+        }
+      }
+    }
+
+    const directlyAllowedResult: InvitationScopeResult['directlyAllowedSpaces'] =
+      directlyAllowedSpaces.map((s) => ({
+        id: s._id,
+        name: s.name,
+        type: s.type,
+        level: s.level,
+      }));
+
+    const totalAllowed = allAllowedSpaceIds.size;
+    const floorCount = [...allAllowedSpaceIds].filter((id) => {
+      const s = [...directlyAllowedSpaces, ...inheritedAllowedSpaces.map((i) => ({ ...i }))].find(
+        (sp) => sp.id.toString() === id
+      );
+      return s?.type === 'floor';
+    }).length;
+    const roomCount = [...allAllowedSpaceIds].filter((id) => {
+      const s = [...directlyAllowedSpaces, ...inheritedAllowedSpaces.map((i) => ({ ...i }))].find(
+        (sp) => sp.id.toString() === id
+      );
+      return s?.type === 'room';
+    }).length;
+    const areaCount = [...allAllowedSpaceIds].filter((id) => {
+      const s = [...directlyAllowedSpaces, ...inheritedAllowedSpaces.map((i) => ({ ...i }))].find(
+        (sp) => sp.id.toString() === id
+      );
+      return s?.type === 'area';
+    }).length;
+
+    const scopeParts: string[] = [];
+    if (floorCount > 0) scopeParts.push(`${floorCount} 个楼层`);
+    if (roomCount > 0) scopeParts.push(`${roomCount} 个房间`);
+    if (areaCount > 0) scopeParts.push(`${areaCount} 个区域`);
+    const scopeDescription = `共可访问 ${totalAllowed} 个空间：${scopeParts.join('、')}。${
+      inheritedAllowedSpaces.length > 0
+        ? `其中直接授权 ${directlyAllowedResult.length} 个，继承授权 ${inheritedAllowedSpaces.length} 个。`
+        : ''
+    }`;
+
+    return {
+      invitation: {
+        id: invitation._id,
+        code: invitation.code,
+        type: invitation.type,
+        status: invitation.status,
+        expiresAt: invitation.expiresAt,
+        inviteeEmail: invitation.inviteeEmail,
+        inviteeName: invitation.inviteeName,
+        createdByName: creator?.displayName,
+      },
+      directlyAllowedSpaces: directlyAllowedResult,
+      inheritedAllowedSpaces,
+      allAllowedSpaceIds: Array.from(allAllowedSpaceIds).map(
+        (id) => new mongoose.Types.ObjectId(id)
+      ),
+      totalAllowed,
+      scopeDescription,
+    };
   }
 }
 

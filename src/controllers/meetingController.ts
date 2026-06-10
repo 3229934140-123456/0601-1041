@@ -99,6 +99,42 @@ export const createMeeting = asyncHandler(async (req: Request, res: Response, ne
     .populate('roomId', 'name type');
 
   sendSuccess(res, { meeting: populated }, 201);
+
+  try {
+    const { default: NotificationService } = await import('../services/NotificationService');
+    const attendeeUserIds = attendees
+      .map((a) => a.userId.toString())
+      .filter((uid) => uid !== req.user!._id.toString());
+
+    const timeStr = start.toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+
+    await NotificationService.batchCreate({
+      userIds: attendeeUserIds,
+      type: 'meeting_invite',
+      priority: 'high',
+      title: `会议邀请: ${title}`,
+      content: `${req.user!.displayName} 邀请您参加会议，时间: ${timeStr}，地点: ${room.name}`,
+      entityType: 'meeting',
+      entityId: meeting._id,
+      roomId: meeting.roomId,
+      actorUserId: req.user!._id,
+      actionUrl: `/meeting/${meeting._id}`,
+      dedupKey: `meeting_invite_${meeting._id}`,
+      dedupWindowMinutes: 30,
+      metadata: {
+        meetingTitle: title,
+        scheduledStart: start,
+        roomName: room.name,
+      },
+    });
+  } catch (_e) {
+    // 通知失败忽略
+  }
 });
 
 export const getMeetings = asyncHandler(async (req: Request, res: Response) => {
@@ -257,6 +293,30 @@ export const startMeeting = asyncHandler(async (req: Request, res: Response, nex
     roomId: meeting.roomId as any,
     description: `开始会议: ${meeting.title}`,
   });
+
+  try {
+    const { default: NotificationService } = await import('../services/NotificationService');
+    const attendeeUserIds = meeting.attendees
+      .map((a) => a.userId.toString())
+      .filter((uid) => uid !== req.user!._id.toString());
+
+    await NotificationService.batchCreate({
+      userIds: attendeeUserIds,
+      type: 'meeting_start',
+      priority: 'high',
+      title: `会议已开始: ${meeting.title}`,
+      content: `${req.user!.displayName} 已开始会议，请尽快加入`,
+      entityType: 'meeting',
+      entityId: meeting._id,
+      roomId: meeting.roomId,
+      actorUserId: req.user!._id,
+      actionUrl: `/meeting/${meeting._id}`,
+      dedupKey: `meeting_start_${meeting._id}`,
+      dedupWindowMinutes: 5,
+    });
+  } catch (_e) {
+    // 通知失败忽略
+  }
 
   sendSuccess(res, { meeting });
 });

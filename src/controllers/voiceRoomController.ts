@@ -59,6 +59,39 @@ export const createVoiceRoom = asyncHandler(async (req: Request, res: Response, 
     metadata: { isPrivate, maxParticipants },
   });
 
+  try {
+    const { default: NotificationService } = await import('../services/NotificationService');
+    if (allowedUsers && allowedUsers.length > 0) {
+      const targetUserIds = allowedUsers.filter(
+        (uid: string) => uid !== req.user!._id.toString()
+      );
+
+      if (targetUserIds.length > 0) {
+        await NotificationService.batchCreate({
+          userIds: targetUserIds,
+          type: 'voice_invite',
+          priority: 'high',
+          title: `语音房间邀请: ${name}`,
+          content: `${req.user!.displayName} 邀请您加入语音房间`,
+          entityType: 'voice_room',
+          entityId: voiceRoom._id,
+          roomId: voiceRoom.roomId,
+          actorUserId: req.user!._id,
+          actionUrl: `/voice-room/${voiceRoom._id}`,
+          dedupKey: `voice_invite_${voiceRoom._id}`,
+          dedupWindowMinutes: 10,
+          metadata: {
+            roomName: name,
+            isPrivate,
+            accessCode,
+          },
+        });
+      }
+    }
+  } catch (_e) {
+    // 通知失败忽略
+  }
+
   sendSuccess(res, { voiceRoom }, 201);
 });
 

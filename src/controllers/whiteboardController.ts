@@ -172,6 +172,53 @@ export const updateElement = asyncHandler(async (req: Request, res: Response, ne
   whiteboard.lastModifiedBy = req.user!._id;
   await whiteboard.save();
 
+  try {
+    const { getIO } = await import('../socket');
+    const { default: NotificationService } = await import('../services/NotificationService');
+
+    const io = getIO();
+    const roomKey = `whiteboard:${whiteboardId}`;
+    io.to(roomKey).emit('whiteboard:updated', {
+      whiteboardId,
+      elementId,
+      element,
+      updatedBy: req.user!._id,
+    });
+
+    const notifiedUserIds = new Set<string>();
+    const sockets = await io.in(roomKey).fetchSockets();
+    for (const s of sockets) {
+      const uid = (s as any).user?._id?.toString();
+      if (uid && uid !== req.user!._id.toString()) {
+        notifiedUserIds.add(uid);
+      }
+    }
+
+    if (notifiedUserIds.size > 0) {
+      await NotificationService.batchCreate({
+        userIds: Array.from(notifiedUserIds),
+        type: 'whiteboard_update',
+        priority: 'normal',
+        title: `白板更新: ${whiteboard.name}`,
+        content: `${req.user!.displayName} 更新了白板中的「${element.type}」元素`,
+        entityType: 'whiteboard',
+        entityId: whiteboard._id,
+        roomId: whiteboard.roomId,
+        actorUserId: req.user!._id,
+        actionUrl: `/whiteboard/${whiteboard._id}`,
+        dedupKey: `wb_update_${whiteboard._id}_${Math.floor(Date.now() / 30000)}`,
+        dedupWindowMinutes: 1,
+        metadata: {
+          elementId,
+          elementType: element.type,
+          whiteboardName: whiteboard.name,
+        },
+      });
+    }
+  } catch (_e) {
+    // 通知失败忽略
+  }
+
   await ActivityLogger.log({
     userId: req.user!._id as any,
     type: 'whiteboard_update',

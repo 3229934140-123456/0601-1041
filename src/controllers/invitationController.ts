@@ -65,6 +65,43 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response,
     },
   });
 
+  try {
+    const { default: NotificationService } = await import('../services/NotificationService');
+    const Space = (await import('../models/Space')).default;
+    const spaces = await Space.find({
+      _id: { $in: invitation.allowedSpaces || [] },
+    }).select('name type');
+    const spaceNames = spaces.map((s) => s.name).join('、');
+
+    const User = (await import('../models/User')).default;
+    const existingUser = inviteeEmail
+      ? await User.findOne({ email: inviteeEmail.toLowerCase() }).select('_id')
+      : null;
+
+    if (existingUser) {
+      await NotificationService.create({
+        userId: existingUser._id,
+        type: 'invitation',
+        priority: 'high',
+        title: `您收到了来自 ${req.user!.displayName} 的${type === 'member' ? '成员' : '访客'}邀请`,
+        content: `邀请码: ${invitation.code}\n可访问空间: ${spaceNames || allowedSpaces?.length + '个空间'}\n${message || ''}`,
+        entityType: 'invitation',
+        entityId: invitation._id,
+        actorUserId: req.user!._id,
+        actionUrl: `/invitations/${invitation._id}`,
+        dedupKey: `invite_${invitation._id}`,
+        dedupWindowMinutes: 60,
+        metadata: {
+          code: invitation.code,
+          type: type || 'guest',
+          allowedSpaces: spaceNames,
+        },
+      });
+    }
+  } catch (_e) {
+    // 通知失败忽略
+  }
+
   sendSuccess(res, { invitation }, 201);
 });
 
