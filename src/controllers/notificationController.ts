@@ -116,3 +116,35 @@ export const createSystemNotification = asyncHandler(async (req: Request, res: R
     sendSuccess(res, { sentCount: userIds.length });
   }
 });
+
+export const getNotificationPreferences = asyncHandler(async (req: Request, res: Response) => {
+  const preferences = await NotificationService.getNotificationPreferences(req.user!._id);
+  sendSuccess(res, { preferences });
+});
+
+export const updateNotificationPreferences = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  const { preferences } = req.body;
+
+  if (!preferences || !Array.isArray(preferences)) {
+    return next(new AppError('请提供通知偏好设置数组', 400));
+  }
+
+  try {
+    const updated = await NotificationService.updateNotificationPreferences(
+      req.user!._id,
+      preferences
+    );
+    sendSuccess(res, { preferences: updated });
+  } catch (err: any) {
+    return next(new AppError(err.message || '更新通知偏好失败', 400));
+  }
+});
+
+export const getDeliveryStats = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  if (req.user!.role !== 'admin' && req.user!.role !== 'moderator') {
+    return next(new AppError('只有管理员或协调员可以查看投递统计', 403));
+  }
+
+  const stats = await NotificationService.getDeliveryStats();
+  sendSuccess(res, { stats });
+});

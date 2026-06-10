@@ -175,6 +175,9 @@ export const updateElement = asyncHandler(async (req: Request, res: Response, ne
   try {
     const { getIO } = await import('../socket');
     const { default: NotificationService } = await import('../services/NotificationService');
+    const Seat = (await import('../models/Seat')).default;
+    const Space = (await import('../models/Space')).default;
+    const mongoose = await import('mongoose');
 
     const io = getIO();
     const roomKey = `whiteboard:${whiteboardId}`;
@@ -191,6 +194,36 @@ export const updateElement = asyncHandler(async (req: Request, res: Response, ne
       const uid = (s as any).user?._id?.toString();
       if (uid && uid !== req.user!._id.toString()) {
         notifiedUserIds.add(uid);
+      }
+    }
+
+    const roomIdObj = typeof whiteboard.roomId === 'string'
+      ? new mongoose.Types.ObjectId(whiteboard.roomId)
+      : whiteboard.roomId;
+
+    const occupiedSeats = await Seat.find({
+      roomId: roomIdObj,
+      occupiedBy: { $exists: true, $ne: null },
+    });
+
+    for (const seat of occupiedSeats) {
+      if (seat.occupiedBy) {
+        const uid = seat.occupiedBy.toString();
+        if (uid !== req.user!._id.toString()) {
+          notifiedUserIds.add(uid);
+        }
+      }
+    }
+
+    if (whiteboard.roomId) {
+      const room = await Space.findById(roomIdObj).select('allowedUsers');
+      if (room && room.allowedUsers && room.allowedUsers.length > 0) {
+        for (const uid of room.allowedUsers) {
+          const uidStr = uid.toString();
+          if (uidStr !== req.user!._id.toString()) {
+            notifiedUserIds.add(uidStr);
+          }
+        }
       }
     }
 

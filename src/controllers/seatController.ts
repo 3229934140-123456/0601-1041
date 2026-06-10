@@ -339,6 +339,33 @@ export const releaseSeat = asyncHandler(async (req: Request, res: Response, next
     },
   });
 
+  try {
+    const { default: NotificationService } = await import('../services/NotificationService');
+    await NotificationService.create({
+      userId: targetUserId,
+      type: 'seat_released',
+      priority: 'normal',
+      title: isSelf ? '座位已释放' : '座位被收回',
+      content: isSelf
+        ? `您已释放座位: ${seat.name}`
+        : `${req.user!.displayName} (管理员) 收回了您的座位: ${seat.name}`,
+      entityType: 'seat',
+      entityId: seat._id,
+      roomId: seat.roomId,
+      actorUserId: operatorUserId,
+      actionUrl: `/seats`,
+      dedupKey: `seat_released_${seat._id}_${Date.now()}`,
+      dedupWindowMinutes: 5,
+      metadata: {
+        seatName: seat.name,
+        isAdminAction: !isSelf,
+        isSelf,
+      },
+    });
+  } catch (_e) {
+    // 通知失败忽略
+  }
+
   sendSuccess(res, { seat });
 });
 

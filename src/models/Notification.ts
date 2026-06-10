@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
+import { NotificationCategory } from './User';
 
 export type NotificationType =
   | 'system'
@@ -11,6 +12,7 @@ export type NotificationType =
   | 'ban'
   | 'seat_change'
   | 'seat_assigned'
+  | 'seat_released'
   | 'whiteboard_update'
   | 'voice_invite'
   | 'voice_join'
@@ -22,10 +24,35 @@ export type NotificationType =
   | 'custom';
 
 export type NotificationPriority = 'low' | 'normal' | 'high' | 'urgent';
+export type NotificationDeliveryStatus = 'pending' | 'pushed' | 'stored_only' | 'skipped' | 'failed';
+
+export const NOTIFICATION_TYPE_TO_CATEGORY: Record<NotificationType, NotificationCategory> = {
+  system: 'system',
+  meeting_reminder: 'meeting',
+  meeting_start: 'meeting',
+  meeting_end: 'meeting',
+  meeting_invite: 'meeting',
+  invitation: 'visitor',
+  kick: 'system',
+  ban: 'system',
+  seat_change: 'seat',
+  seat_assigned: 'seat',
+  seat_released: 'seat',
+  whiteboard_update: 'whiteboard',
+  voice_invite: 'voice',
+  voice_join: 'voice',
+  permission_change: 'permission',
+  space_access_granted: 'permission',
+  space_access_revoked: 'permission',
+  role_change: 'permission',
+  file_uploaded: 'system',
+  custom: 'system',
+};
 
 export interface INotification extends Document {
   userId: mongoose.Types.ObjectId;
   type: NotificationType;
+  category: NotificationCategory;
   priority: NotificationPriority;
   title: string;
   content?: string;
@@ -36,6 +63,8 @@ export interface INotification extends Document {
   actorUserId?: mongoose.Types.ObjectId;
   isRead: boolean;
   readAt?: Date;
+  deliveryStatus: NotificationDeliveryStatus;
+  pushedAt?: Date;
   actionUrl?: string;
   metadata?: Record<string, any>;
   createdAt: Date;
@@ -62,6 +91,7 @@ const NotificationSchema: Schema<INotification> = new Schema(
         'ban',
         'seat_change',
         'seat_assigned',
+        'seat_released',
         'whiteboard_update',
         'voice_invite',
         'voice_join',
@@ -72,6 +102,12 @@ const NotificationSchema: Schema<INotification> = new Schema(
         'file_uploaded',
         'custom',
       ],
+      required: true,
+      index: true,
+    },
+    category: {
+      type: String,
+      enum: ['meeting', 'whiteboard', 'voice', 'seat', 'visitor', 'permission', 'system'],
       required: true,
       index: true,
     },
@@ -118,6 +154,13 @@ const NotificationSchema: Schema<INotification> = new Schema(
       index: true,
     },
     readAt: Date,
+    deliveryStatus: {
+      type: String,
+      enum: ['pending', 'pushed', 'stored_only', 'skipped', 'failed'],
+      default: 'pending',
+      index: true,
+    },
+    pushedAt: Date,
     actionUrl: {
       type: String,
       trim: true,
@@ -133,6 +176,8 @@ const NotificationSchema: Schema<INotification> = new Schema(
 
 NotificationSchema.index({ userId: 1, isRead: 1, createdAt: -1 });
 NotificationSchema.index({ userId: 1, type: 1, createdAt: -1 });
+NotificationSchema.index({ userId: 1, category: 1, createdAt: -1 });
+NotificationSchema.index({ category: 1, deliveryStatus: 1, createdAt: -1 });
 NotificationSchema.index({ createdAt: -1 });
 
 const Notification: Model<INotification> = mongoose.model<INotification>(

@@ -29,7 +29,7 @@ export type ActivityType =
   | 'user_ban'
   | 'custom';
 
-export type EntityType = 'user' | 'space' | 'seat' | 'whiteboard' | 'voice_room' | 'meeting' | 'file' | 'invitation' | 'permission';
+export type EntityType = 'user' | 'space' | 'seat' | 'whiteboard' | 'voice_room' | 'meeting' | 'file' | 'invitation' | 'permission' | 'system';
 
 export interface IActivityLog extends Document {
   userId: mongoose.Types.ObjectId;
@@ -99,7 +99,7 @@ const ActivityLogSchema: Schema<IActivityLog> = new Schema(
     },
     entityType: {
       type: String,
-      enum: ['user', 'space', 'seat', 'whiteboard', 'voice_room', 'meeting', 'file', 'invitation', 'permission'],
+      enum: ['user', 'space', 'seat', 'whiteboard', 'voice_room', 'meeting', 'file', 'invitation', 'permission', 'system'],
       required: true,
     },
     entityId: {

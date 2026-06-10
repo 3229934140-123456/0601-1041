@@ -1,5 +1,12 @@
 import mongoose from 'mongoose';
-import Notification, { INotification, NotificationType, NotificationPriority } from '../models/Notification';
+import Notification, {
+  INotification,
+  NotificationType,
+  NotificationPriority,
+  NOTIFICATION_TYPE_TO_CATEGORY,
+  NotificationDeliveryStatus,
+} from '../models/Notification';
+import User, { NotificationCategory, NotificationDeliveryMode, IUser } from '../models/User';
 import { onlineUsers, getIO } from '../socket';
 
 export interface CreateNotificationParams {
@@ -17,6 +24,17 @@ export interface CreateNotificationParams {
   metadata?: Record<string, any>;
   dedupKey?: string;
   dedupWindowMinutes?: number;
+}
+
+export interface NotificationDeliveryStats {
+  category: NotificationCategory;
+  totalSent: number;
+  pushedSuccess: number;
+  storedOnly: number;
+  skipped: number;
+  failed: number;
+  unreadBacklog: number;
+  last24hSent: number;
 }
 
 class NotificationService {
@@ -49,17 +67,39 @@ class NotificationService {
     return !!existing;
   }
 
+  private static async getUserPreference(
+    userId: mongoose.Types.ObjectId | string,
+    category: NotificationCategory
+  ): Promise<NotificationDeliveryMode> {
+    const id = typeof userId === 'string' ? new mongoose.Types.ObjectId(userId) : userId;
+    const user = await User.findById(id).select('notificationPreferences');
+    if (!user) return 'push_and_store';
+
+    const pref = user.notificationPreferences?.find((p) => p.category === category);
+    return pref?.mode || 'push_and_store';
+  }
+
   static async create(params: CreateNotificationParams): Promise<INotification | null> {
+    const category = NOTIFICATION_TYPE_TO_CATEGORY[params.type] || 'system';
+    const mode = await this.getUserPreference(params.userId, category);
+
+    if (mode === 'disabled') {
+      return null;
+    }
+
     const isDuplicate = await this.checkDuplicate(params);
     if (isDuplicate) {
       return null;
     }
+
+    const deliveryStatus: NotificationDeliveryStatus = mode === 'store_only' ? 'stored_only' : 'pending';
 
     const notification = new Notification({
       userId: typeof params.userId === 'string'
         ? new mongoose.Types.ObjectId(params.userId)
         : params.userId,
       type: params.type,
+      category,
       priority: params.priority || 'normal',
       title: params.title,
       content: params.content,
@@ -84,6 +124,7 @@ class NotificationService {
           ? new mongoose.Types.ObjectId(params.actorUserId)
           : params.actorUserId
         : undefined,
+      deliveryStatus,
       actionUrl: params.actionUrl,
       metadata: params.dedupKey
         ? { ...params.metadata, dedupKey: params.dedupKey }
@@ -91,7 +132,10 @@ class NotificationService {
     });
 
     await notification.save();
-    await this.pushToUser(notification);
+
+    if (mode === 'push_and_store') {
+      await this.pushToUser(notification);
+    }
 
     return notification;
   }
@@ -99,16 +143,32 @@ class NotificationService {
   static async batchCreate(params: Omit<CreateNotificationParams, 'userId'> & {
     userIds: (mongoose.Types.ObjectId | string)[];
   }): Promise<INotification[]> {
+    const category = NOTIFICATION_TYPE_TO_CATEGORY[params.type] || 'system';
     const notifications: INotification[] = [];
     const now = new Date();
 
+    const userPrefs = new Map<string, NotificationDeliveryMode>();
+    for (const uid of params.userIds) {
+      const mode = await this.getUserPreference(uid, category);
+      userPrefs.set(typeof uid === 'string' ? uid : uid.toString(), mode);
+    }
+
     for (const userId of params.userIds) {
+      const userIdStr = typeof userId === 'string' ? userId : userId.toString();
+      const mode = userPrefs.get(userIdStr) || 'push_and_store';
+
+      if (mode === 'disabled') continue;
+
       const isDuplicate = await this.checkDuplicate({ ...params, userId });
       if (isDuplicate) continue;
+
+      const deliveryStatus: NotificationDeliveryStatus = mode === 'store_only' ? 'stored_only' : 'pending';
 
       const notification = new Notification({
         ...params,
         userId: typeof userId === 'string' ? new mongoose.Types.ObjectId(userId) : userId,
+        category,
+        deliveryStatus,
         createdAt: now,
         metadata: params.dedupKey
           ? { ...params.metadata, dedupKey: params.dedupKey }
@@ -122,7 +182,11 @@ class NotificationService {
     const saved = await Notification.insertMany(notifications);
 
     for (const n of saved) {
-      await this.pushToUser(n);
+      const userIdStr = n.userId.toString();
+      const mode = userPrefs.get(userIdStr) || 'push_and_store';
+      if (mode === 'push_and_store') {
+        await this.pushToUser(n);
+      }
     }
 
     return saved;
@@ -132,11 +196,13 @@ class NotificationService {
     try {
       const userId = notification.userId.toString();
       const online = onlineUsers.get(userId);
+
       if (online) {
         const io = getIO();
         io.to(online.socketId).emit('notification:new', {
           id: notification._id,
           type: notification.type,
+          category: notification.category,
           priority: notification.priority,
           title: notification.title,
           content: notification.content,
@@ -151,9 +217,18 @@ class NotificationService {
         io.to(online.socketId).emit('notification:unread-count', {
           unreadCount,
         });
+
+        notification.deliveryStatus = 'pushed';
+        notification.pushedAt = new Date();
+        await notification.save();
       }
     } catch (_e) {
-      // 推送失败忽略（可能Socket.IO还没初始化）
+      try {
+        notification.deliveryStatus = 'failed';
+        await notification.save();
+      } catch (_e2) {
+        // 忽略
+      }
     }
   }
 
@@ -330,6 +405,106 @@ class NotificationService {
         type: invitation.type,
       },
     });
+  }
+
+  static async getNotificationPreferences(
+    userId: mongoose.Types.ObjectId | string
+  ): Promise<IUser['notificationPreferences']> {
+    const id = typeof userId === 'string' ? new mongoose.Types.ObjectId(userId) : userId;
+    const user = await User.findById(id).select('notificationPreferences');
+    if (!user) {
+      throw new Error('用户不存在');
+    }
+    return user.notificationPreferences;
+  }
+
+  static async updateNotificationPreferences(
+    userId: mongoose.Types.ObjectId | string,
+    preferences: { category: NotificationCategory; mode: NotificationDeliveryMode }[]
+  ): Promise<IUser['notificationPreferences']> {
+    const id = typeof userId === 'string' ? new mongoose.Types.ObjectId(userId) : userId;
+    const user = await User.findById(id);
+    if (!user) {
+      throw new Error('用户不存在');
+    }
+
+    const validCategories: NotificationCategory[] = ['meeting', 'whiteboard', 'voice', 'seat', 'visitor', 'permission', 'system'];
+    const validModes: NotificationDeliveryMode[] = ['push_and_store', 'store_only', 'disabled'];
+
+    for (const pref of preferences) {
+      if (!validCategories.includes(pref.category)) {
+        throw new Error(`无效的通知类别: ${pref.category}`);
+      }
+      if (!validModes.includes(pref.mode)) {
+        throw new Error(`无效的通知模式: ${pref.mode}`);
+      }
+    }
+
+    const existingPrefs = user.notificationPreferences || [];
+    for (const pref of preferences) {
+      const idx = existingPrefs.findIndex((p) => p.category === pref.category);
+      if (idx >= 0) {
+        existingPrefs[idx].mode = pref.mode;
+      } else {
+        existingPrefs.push(pref as any);
+      }
+    }
+
+    user.notificationPreferences = existingPrefs;
+    await user.save({ validateBeforeSave: false });
+
+    return user.notificationPreferences;
+  }
+
+  static async getDeliveryStats(): Promise<NotificationDeliveryStats[]> {
+    const categories: NotificationCategory[] = ['meeting', 'whiteboard', 'voice', 'seat', 'visitor', 'permission', 'system'];
+    const stats: NotificationDeliveryStats[] = [];
+    const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    for (const category of categories) {
+      const [totalResult, last24hResult, unreadBacklog] = await Promise.all([
+        Notification.aggregate([
+          { $match: { category } },
+          {
+            $group: {
+              _id: '$deliveryStatus',
+              count: { $sum: 1 },
+            },
+          },
+        ]),
+        Notification.aggregate([
+          { $match: { category, createdAt: { $gte: last24h } } },
+          {
+            $group: {
+              _id: '$deliveryStatus',
+              count: { $sum: 1 },
+            },
+          },
+        ]),
+        Notification.countDocuments({ category, isRead: false }),
+      ]);
+
+      const getCount = (results: any[], status: string) => {
+        const found = results.find((r) => r._id === status);
+        return found?.count || 0;
+      };
+
+      const totalSent = totalResult.reduce((sum, r) => sum + r.count, 0);
+      const last24hSent = last24hResult.reduce((sum, r) => sum + r.count, 0);
+
+      stats.push({
+        category,
+        totalSent,
+        pushedSuccess: getCount(totalResult, 'pushed'),
+        storedOnly: getCount(totalResult, 'stored_only'),
+        skipped: getCount(totalResult, 'skipped'),
+        failed: getCount(totalResult, 'failed'),
+        unreadBacklog,
+        last24hSent,
+      });
+    }
+
+    return stats;
   }
 }
 

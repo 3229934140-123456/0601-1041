@@ -5,6 +5,14 @@ export type UserRole = 'admin' | 'moderator' | 'member' | 'guest';
 export type UserStatus = 'active' | 'banned' | 'inactive';
 export type OnlineStatus = 'online' | 'offline' | 'busy' | 'away';
 
+export type NotificationCategory = 'meeting' | 'whiteboard' | 'voice' | 'seat' | 'visitor' | 'permission' | 'system';
+export type NotificationDeliveryMode = 'push_and_store' | 'store_only' | 'disabled';
+
+export interface INotificationPreference {
+  category: NotificationCategory;
+  mode: NotificationDeliveryMode;
+}
+
 export interface IUser extends Document {
   email: string;
   password: string;
@@ -17,6 +25,7 @@ export interface IUser extends Document {
   currentRoomId?: mongoose.Types.ObjectId;
   currentSeatId?: mongoose.Types.ObjectId;
   allowedSpaces: mongoose.Types.ObjectId[];
+  notificationPreferences: INotificationPreference[];
   lastActiveAt: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -82,6 +91,32 @@ const UserSchema: Schema<IUser> = new Schema(
         ref: 'Space',
       },
     ],
+    notificationPreferences: {
+      type: [
+        {
+          category: {
+            type: String,
+            enum: ['meeting', 'whiteboard', 'voice', 'seat', 'visitor', 'permission', 'system'],
+            required: true,
+          },
+          mode: {
+            type: String,
+            enum: ['push_and_store', 'store_only', 'disabled'],
+            default: 'push_and_store',
+            required: true,
+          },
+        },
+      ],
+      default: [
+        { category: 'meeting', mode: 'push_and_store' },
+        { category: 'whiteboard', mode: 'push_and_store' },
+        { category: 'voice', mode: 'push_and_store' },
+        { category: 'seat', mode: 'push_and_store' },
+        { category: 'visitor', mode: 'push_and_store' },
+        { category: 'permission', mode: 'push_and_store' },
+        { category: 'system', mode: 'push_and_store' },
+      ],
+    },
     lastActiveAt: {
       type: Date,
       default: Date.now,

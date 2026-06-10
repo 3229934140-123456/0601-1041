@@ -678,32 +678,78 @@ export const updateAttendeeStatus = asyncHandler(async (req: Request, res: Respo
 });
 
 export const sendMeetingReminder = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-  const { meetingId, userIds } = req.body;
+  const { meetingId, userIds, minutesBefore = 5 } = req.body;
 
   const meeting = await Meeting.findById(meetingId)
-    .populate('attendees.userId', 'displayName email');
+    .populate('attendees.userId', 'displayName email')
+    .populate('roomId', 'name');
   if (!meeting) {
     return next(new AppError('会议不存在', 404));
   }
 
-  const targets = userIds && userIds.length > 0
-    ? meeting.attendees.filter((a) => userIds.includes(a.userId.toString()))
-    : meeting.attendees.filter((a) => !a.reminderSent);
+  let targets: typeof meeting.attendees;
+  let sendMode: 'specified' | 'unreminded';
 
-  const sent: string[] = [];
+  if (userIds && Array.isArray(userIds) && userIds.length > 0) {
+    targets = meeting.attendees.filter((a) => userIds.includes(a.userId.toString()));
+    sendMode = 'specified';
+  } else {
+    targets = meeting.attendees.filter((a) => !a.reminderSent && a.userId.toString() !== meeting.organizerId.toString());
+    sendMode = 'unreminded';
+  }
+
+  if (targets.length === 0) {
+    return sendSuccess(res, {
+      sentCount: 0,
+      sentUserIds: [],
+      sendMode,
+      message: '没有需要发送提醒的参会人',
+    });
+  }
+
+  const { default: NotificationService } = await import('../services/NotificationService');
+
+  const targetUserIds = targets.map((t) => t.userId.toString());
+  const timeStr = meeting.scheduledStart.toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  const roomName = (meeting.roomId as any)?.name || '无房间';
+
+  const notifications = await NotificationService.batchCreate({
+    userIds: targetUserIds,
+    type: 'meeting_reminder',
+    priority: 'high',
+    title: `会议提醒: ${meeting.title}`,
+    content: `会议将在 ${minutesBefore} 分钟后开始 (${timeStr})，地点: ${roomName}，请准时参加`,
+    entityType: 'meeting',
+    entityId: meeting._id,
+    roomId: meeting.roomId,
+    actionUrl: `/meeting/${meeting._id}`,
+    dedupKey: `meeting_reminder_${meeting._id}_${sendMode}`,
+    dedupWindowMinutes: 30,
+    metadata: {
+      meetingTitle: meeting.title,
+      scheduledStart: meeting.scheduledStart,
+      roomName,
+      minutesBefore,
+      sendMode,
+    },
+  });
+
+  const sentUserIds: string[] = [];
   for (const attendee of targets) {
     attendee.reminderSent = true;
-    sent.push(attendee.userId.toString());
-
-    const user = (attendee.userId as any);
-    console.log(`📧 发送会议提醒: ${meeting.title} -> ${user?.displayName || user?.email}`);
+    sentUserIds.push(attendee.userId.toString());
   }
 
   await meeting.save();
 
   sendSuccess(res, {
-    sentCount: sent.length,
-    sentUserIds: sent,
+    sentCount: notifications.length,
+    sentUserIds,
+    sendMode,
+    skippedDueToDedup: targets.length - notifications.length,
   });
 });
 

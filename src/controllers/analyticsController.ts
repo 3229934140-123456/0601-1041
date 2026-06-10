@@ -371,14 +371,27 @@ export const generateCollaborationSummary = asyncHandler(async (req: Request, re
       { $sort: { count: -1 } },
     ]),
     Meeting.find({
-      $or: [
-        { scheduledStart: { $gte: startDate, $lte: endDate } },
-        { scheduledEnd: { $gte: startDate, $lte: endDate } },
-        { actualStart: { $gte: startDate, $lte: endDate } },
+      $and: [
+        {
+          $or: [
+            { scheduledStart: { $gte: startDate, $lte: endDate } },
+            { scheduledEnd: { $gte: startDate, $lte: endDate } },
+            { actualStart: { $gte: startDate, $lte: endDate } },
+          ],
+        },
+        ...(scopeSpaceIds ? [{ roomId: { $in: scopeSpaceIds } }] : []),
+        ...(userId ? [
+          {
+            $or: [
+              { organizerId: new mongoose.Types.ObjectId(userId) },
+              { 'attendees.userId': new mongoose.Types.ObjectId(userId) },
+            ],
+          }
+        ] : []),
       ],
-      ...(scopeSpaceIds ? { roomId: { $in: scopeSpaceIds } } : {}),
     })
       .populate('organizerId', 'displayName avatar')
+      .populate('attendees.userId', 'displayName avatar email')
       .populate('roomId', 'name')
       .sort({ scheduledStart: 1 }),
     ActivityLog.aggregate([
