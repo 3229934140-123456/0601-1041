@@ -73,6 +73,30 @@ export const grantUserSpaces = asyncHandler(async (req: Request, res: Response, 
     metadata: { targetUserId: userId, spaceCount: validIds.length, mode },
   });
 
+  try {
+    const { default: NotificationService } = await import('../services/NotificationService');
+    const Space = (await import('../models/Space')).default;
+    const spaces = await Space.find({ _id: { $in: validIds } }).select('name type');
+    const spaceNames = spaces.map((s) => s.name).join('、');
+    await NotificationService.create({
+      userId,
+      type: 'space_access_granted',
+      priority: 'high',
+      title: `您获得了 ${validIds.length} 个空间的访问权限`,
+      content: `${mode === 'replace' ? '管理员重新设置' : '管理员添加'}了您可访问的空间: ${spaceNames || validIds.length + '个空间'}`,
+      entityType: 'permission',
+      entityId: user._id,
+      actorUserId: req.user!._id,
+      actionUrl: '/spaces',
+      metadata: {
+        spaceCount: validIds.length,
+        mode,
+      },
+    });
+  } catch (_e) {
+    // 通知失败忽略
+  }
+
   sendSuccess(res, { user: { allowedSpaces: user.allowedSpaces, _id: user._id } });
 });
 
@@ -98,6 +122,26 @@ export const revokeUserSpaces = asyncHandler(async (req: Request, res: Response,
     description: `撤销用户 ${user.displayName} 的空间访问权限 (${spaceIds.length}个空间)`,
     metadata: { targetUserId: userId, spaceCount: spaceIds.length },
   });
+
+  try {
+    const { default: NotificationService } = await import('../services/NotificationService');
+    await NotificationService.create({
+      userId,
+      type: 'space_access_revoked',
+      priority: 'high',
+      title: `您失去了 ${spaceIds.length} 个空间的访问权限`,
+      content: '管理员撤销了您对部分空间的访问权限',
+      entityType: 'permission',
+      entityId: user._id,
+      actorUserId: req.user!._id,
+      actionUrl: '/spaces',
+      metadata: {
+        spaceCount: spaceIds.length,
+      },
+    });
+  } catch (_e) {
+    // 通知失败忽略
+  }
 
   sendSuccess(res, { user: { allowedSpaces: user.allowedSpaces, _id: user._id } });
 });
@@ -130,7 +174,7 @@ export const getUserPermissions = asyncHandler(async (req: Request, res: Respons
 });
 
 export const checkSpaceAccess = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-  const { userId, spaceId } = req.body;
+  const { userId, spaceId, invitationId, adminViewMode, checkInheritance = true } = req.body;
 
   const space = await Space.findById(spaceId);
   if (!space) {
@@ -142,31 +186,46 @@ export const checkSpaceAccess = asyncHandler(async (req: Request, res: Response,
     return next(new AppError('用户不存在', 404));
   }
 
-  let canAccess = space.isPublic;
-  let accessReason = space.isPublic ? '空间公开' : '';
+  const SpaceAccessService = (await import('../services/SpaceAccessService')).default;
+  const result = await SpaceAccessService.checkAccess(
+    user as any,
+    space,
+    {
+      checkInheritance,
+      invitationId,
+      adminViewMode,
+    }
+  );
 
-  if (user.role === 'admin') {
-    canAccess = true;
-    accessReason = '管理员权限';
-  } else if (!space.isPublic) {
-    if (space.allowedRoles && space.allowedRoles.includes(user.role)) {
-      canAccess = true;
-      accessReason = `角色允许: ${user.role}`;
-    }
-    if (space.allowedUsers && space.allowedUsers.some((u) => u.toString() === userId)) {
-      canAccess = true;
-      accessReason = '被列入空间白名单';
-    }
-    if (user.allowedSpaces && user.allowedSpaces.some((s) => s.toString() === spaceId)) {
-      canAccess = true;
-      accessReason = '用户被授予空间权限';
-    }
-  }
+  const denialExplanation = result.access ? null : SpaceAccessService.explainDenial(result);
 
   sendSuccess(res, {
-    canAccess,
-    accessReason,
-    space: { id: space._id, name: space.name, isPublic: space.isPublic },
+    canAccess: result.access,
+    accessLevel: result.level,
+    accessReason: result.reason,
+    matchedBy: result.matchedSpaceId
+      ? {
+          spaceId: result.matchedSpaceId,
+          spaceName: result.matchedSpaceName,
+          rule: result.matchedRule,
+        }
+      : null,
+    chain: result.chain,
+    isInherited: result.level === 'parent_inherited',
+    invitationId: result.invitationId,
+    denialExplanation,
+    space: {
+      id: space._id,
+      name: space.name,
+      type: space.type,
+      isPublic: space.isPublic,
+      level: space.level,
+    },
+    user: {
+      id: user._id,
+      displayName: user.displayName,
+      role: user.role,
+    },
   });
 });
 

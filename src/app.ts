@@ -11,6 +11,7 @@ import invitationRoutes from './routes/invitationRoutes';
 import meetingRoutes from './routes/meetingRoutes';
 import permissionRoutes from './routes/permissionRoutes';
 import analyticsRoutes from './routes/analyticsRoutes';
+import notificationRoutes from './routes/notificationRoutes';
 import { notFoundHandler, errorHandler } from './middleware/errorHandler';
 
 const createApp = (): express.Application => {
@@ -66,6 +67,7 @@ const createApp = (): express.Application => {
   app.use('/api/meetings', meetingRoutes);
   app.use('/api/permissions', permissionRoutes);
   app.use('/api/analytics', analyticsRoutes);
+  app.use('/api/notifications', notificationRoutes);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

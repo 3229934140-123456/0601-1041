@@ -5,24 +5,7 @@ import Space, { ISpace } from '../models/Space';
 import AppError from '../utils/AppError';
 import { sendSuccess, sendMessage } from '../utils/response';
 import ActivityLogger from '../services/ActivityLogger';
-
-const canAccessSpace = (user: any, space: ISpace): boolean => {
-  if (!space.isPublic) {
-    if (space.allowedRoles && space.allowedRoles.length > 0) {
-      if (!space.allowedRoles.includes(user.role)) return false;
-    }
-    if (space.allowedUsers && space.allowedUsers.length > 0) {
-      if (!space.allowedUsers.some((u: any) => u.toString() === user._id.toString())) return false;
-    }
-    if (user.role === 'admin') return true;
-  }
-  if (user.allowedSpaces && user.allowedSpaces.length > 0) {
-    if (!user.allowedSpaces.some((s: any) => s.toString() === space._id.toString())) {
-      if (user.role !== 'admin') return false;
-    }
-  }
-  return true;
-};
+import SpaceAccessService from '../services/SpaceAccessService';
 
 export const createSpace = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
   const {
@@ -97,7 +80,13 @@ export const getSpaces = asyncHandler(async (req: Request, res: Response) => {
 
   const spaces = await Space.find(query).sort({ level: 1, sortOrder: 1, createdAt: 1 });
 
-  const filteredSpaces = spaces.filter((space) => canAccessSpace(req.user, space));
+  const accessResults = await SpaceAccessService.canBulkAccess(
+    req.user as any,
+    spaces.map((s) => s._id)
+  );
+  const filteredSpaces = spaces.filter(
+    (space) => accessResults[space._id.toString()]?.access
+  );
 
   sendSuccess(res, { spaces: filteredSpaces });
 });
@@ -108,8 +97,9 @@ export const getSpaceById = asyncHandler(async (req: Request, res: Response, nex
     return next(new AppError('空间不存在', 404));
   }
 
-  if (!canAccessSpace(req.user, space)) {
-    return next(new AppError('您没有权限访问此空间', 403));
+  const accessResult = await SpaceAccessService.checkAccess(req.user as any, space);
+  if (!accessResult.access) {
+    return next(new AppError(`您没有权限访问此空间 (${accessResult.reason})`, 403));
   }
 
   sendSuccess(res, { space });
@@ -120,18 +110,26 @@ export const getSpaceTree = asyncHandler(async (req: Request, res: Response) => 
   const allRooms = await Space.find({ type: 'room', isActive: true }).sort({ sortOrder: 1 });
   const allAreas = await Space.find({ type: 'area', isActive: true }).sort({ sortOrder: 1 });
 
+  const allSpaces = [...floors, ...allRooms, ...allAreas];
+  const accessMap = await SpaceAccessService.canBulkAccess(
+    req.user as any,
+    allSpaces.map((s) => s._id)
+  );
+
+  const canAccess = (space: ISpace) => accessMap[space._id.toString()]?.access;
+
   const buildTree = (floors: ISpace[]) => {
     return floors
-      .filter((f) => canAccessSpace(req.user, f))
+      .filter((f) => canAccess(f))
       .map((floor) => ({
         ...floor.toObject(),
         children: allRooms
           .filter((r) => r.parentId?.toString() === floor._id.toString())
-          .filter((r) => canAccessSpace(req.user, r))
+          .filter((r) => canAccess(r))
           .map((room) => ({
             ...room.toObject(),
             children: allAreas.filter(
-              (a) => a.parentId?.toString() === room._id.toString() && canAccessSpace(req.user, a)
+              (a) => a.parentId?.toString() === room._id.toString() && canAccess(a)
             ),
           })),
       }));
@@ -214,8 +212,9 @@ export const enterSpace = asyncHandler(async (req: Request, res: Response, next:
     return next(new AppError('空间不存在', 404));
   }
 
-  if (!canAccessSpace(req.user, targetSpace)) {
-    return next(new AppError('您没有权限进入此空间', 403));
+  const enterAccess = await SpaceAccessService.checkAccess(req.user as any, targetSpace);
+  if (!enterAccess.access) {
+    return next(new AppError(`您没有权限进入此空间 (${enterAccess.reason})`, 403));
   }
 
   const User = (await import('../models/User')).default;

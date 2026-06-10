@@ -236,16 +236,44 @@ export const kickUser = asyncHandler(async (req: Request, res: Response, next: N
     }
   );
 
+  let socketDisconnected = false;
+  try {
+    const { kickUserBySocket } = await import('../socket');
+    socketDisconnected = kickUserBySocket(userId.toString(), reason);
+  } catch (_e) {
+    // socket未初始化时忽略
+  }
+
+  try {
+    const { default: NotificationService } = await import('../services/NotificationService');
+    await NotificationService.create({
+      userId,
+      type: 'kick',
+      priority: 'urgent',
+      title: '您被管理员移出了元宇宙空间',
+      content: reason || '管理员操作',
+      entityType: 'user',
+      entityId: user._id,
+      actorUserId: req.user!._id,
+      metadata: { reason },
+    });
+  } catch (_e) {
+    // 通知失败忽略
+  }
+
   await ActivityLogger.log({
     userId: req.user!._id as any,
     type: 'user_kick',
     entityType: 'user',
     entityId: user._id as any,
     description: `踢出用户: ${user.displayName}${reason ? ` - 原因: ${reason}` : ''}`,
-    metadata: { reason, targetUserId: userId },
+    metadata: { reason, targetUserId: userId, socketDisconnected },
   });
 
-  sendSuccess(res, { message: `已踢出用户: ${user.displayName}` });
+  sendSuccess(res, {
+    message: `已踢出用户: ${user.displayName}`,
+    socketDisconnected,
+  });
 });
 
 export const banUser = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
@@ -277,14 +305,45 @@ export const banUser = asyncHandler(async (req: Request, res: Response, next: Ne
     }
   );
 
+  let socketDisconnected = false;
+  try {
+    const { kickUserBySocket } = await import('../socket');
+    socketDisconnected = kickUserBySocket(
+      userId.toString(),
+      `您已被封禁: ${reason || '违反平台规则'}`
+    );
+  } catch (_e) {
+    // socket未初始化时忽略
+  }
+
+  try {
+    const { default: NotificationService } = await import('../services/NotificationService');
+    await NotificationService.create({
+      userId,
+      type: 'ban',
+      priority: 'urgent',
+      title: '您的账号已被封禁',
+      content: reason || '违反平台规则',
+      entityType: 'user',
+      entityId: user._id,
+      actorUserId: req.user!._id,
+      metadata: { reason },
+    });
+  } catch (_e) {
+    // 通知失败忽略
+  }
+
   await ActivityLogger.log({
     userId: req.user!._id as any,
     type: 'user_ban',
     entityType: 'user',
     entityId: user._id as any,
     description: `封禁用户: ${user.displayName}${reason ? ` - 原因: ${reason}` : ''}`,
-    metadata: { reason, targetUserId: userId },
+    metadata: { reason, targetUserId: userId, socketDisconnected },
   });
 
-  sendSuccess(res, { message: `已封禁用户: ${user.displayName}` });
+  sendSuccess(res, {
+    message: `已封禁用户: ${user.displayName}`,
+    socketDisconnected,
+  });
 });

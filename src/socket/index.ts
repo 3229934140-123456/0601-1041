@@ -73,6 +73,63 @@ export const initializeSocket = (httpServer: HttpServer): Server => {
     onlineUsers.set(socket.user._id.toString(), onlineUser);
     io.emit('user:online', onlineUser);
 
+    (async () => {
+      try {
+        const { default: NotificationService } = await import('../services/NotificationService');
+        const unreadCount = await NotificationService.getUnreadCount(socket.user!._id);
+        socket.emit('notification:unread-count', { unreadCount });
+
+        if (socket.handshake.auth?.lastNotificationAt) {
+          const since = new Date(socket.handshake.auth.lastNotificationAt);
+          if (!isNaN(since.getTime())) {
+            const missing = await NotificationService.getMissingSince(
+              socket.user!._id,
+              since
+            );
+            socket.emit('notification:catch-up', {
+              notifications: missing,
+              count: missing.length,
+            });
+          }
+        }
+      } catch (_e) {
+        // 通知服务初始化失败时忽略
+      }
+    })();
+
+    socket.on('notification:mark-read', async ({ notificationId }, callback) => {
+      try {
+        const { default: NotificationService } = await import('../services/NotificationService');
+        const success = await NotificationService.markAsRead(
+          socket.user!._id,
+          notificationId
+        );
+        if (callback) callback({ success });
+      } catch (_e) {
+        if (callback) callback({ success: false, error: '服务异常' });
+      }
+    });
+
+    socket.on('notification:mark-all-read', async (_, callback) => {
+      try {
+        const { default: NotificationService } = await import('../services/NotificationService');
+        const count = await NotificationService.markAllAsRead(socket.user!._id);
+        if (callback) callback({ success: true, count });
+      } catch (_e) {
+        if (callback) callback({ success: false, error: '服务异常' });
+      }
+    });
+
+    socket.on('notification:get-unread-count', async (_, callback) => {
+      try {
+        const { default: NotificationService } = await import('../services/NotificationService');
+        const count = await NotificationService.getUnreadCount(socket.user!._id);
+        if (callback) callback({ unreadCount: count });
+      } catch (_e) {
+        if (callback) callback({ unreadCount: 0 });
+      }
+    });
+
     socket.on('user:update-status', ({ status }) => {
       const user = onlineUsers.get(socket.user!._id.toString());
       if (user) {
@@ -212,15 +269,28 @@ export const initializeSocket = (httpServer: HttpServer): Server => {
   return io;
 };
 
-export const getSocketIO = (() => {
-  let ioInstance: Server | null = null;
-  return (): Server | null => ioInstance;
-})();
+let globalIO: Server | null = null;
 
-export const setSocketIO = (io: Server): void => {
-  (getSocketIO as any).ioInstance = io;
-  Object.defineProperty(getSocketIO, 'ioInstance', {
-    value: io,
-    writable: true,
-  });
+export const getIO = (): Server => {
+  if (!globalIO) {
+    throw new Error('Socket.IO 尚未初始化');
+  }
+  return globalIO;
+};
+
+export const setIO = (io: Server): void => {
+  globalIO = io;
+};
+
+export const kickUserBySocket = (userId: string, reason?: string): boolean => {
+  if (!globalIO) return false;
+  const user = onlineUsers.get(userId);
+  if (user) {
+    globalIO.to(user.socketId).emit('kick-notification', { reason });
+    globalIO.sockets.sockets.get(user.socketId)?.disconnect(true);
+    onlineUsers.delete(userId);
+    globalIO.emit('user:offline', { userId });
+    return true;
+  }
+  return false;
 };

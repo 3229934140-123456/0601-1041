@@ -511,24 +511,51 @@ export const addActionItem = asyncHandler(async (req: Request, res: Response, ne
 });
 
 export const updateActionItem = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-  const { meetingId, actionId, content, assigneeId, dueDate, completed } = req.body;
+  const { meetingId, actionId } = req.params;
+  const { content, assigneeId, dueDate, completed } = req.body;
 
   const meeting = await Meeting.findById(meetingId);
   if (!meeting) {
     return next(new AppError('会议不存在', 404));
   }
 
-  const actionItem = (meeting.actionItems || []).find((a: any) => a.id === actionId);
-  if (!actionItem) {
+  const actionItems = meeting.actionItems || [];
+  const actionIndex = actionItems.findIndex((a: any) => a.id === actionId);
+  if (actionIndex === -1) {
     return next(new AppError('待办事项不存在', 404));
   }
 
-  if (content !== undefined) actionItem.content = content;
-  if (assigneeId !== undefined) actionItem.assigneeId = new mongoose.Types.ObjectId(assigneeId);
-  if (dueDate !== undefined) actionItem.dueDate = new Date(dueDate);
-  if (completed !== undefined) actionItem.completed = completed;
+  const actionItem = actionItems[actionIndex] as any;
+  let changed = false;
 
-  await meeting.save();
+  if (content !== undefined && actionItem.content !== content) {
+    actionItem.content = content;
+    changed = true;
+  }
+  if (assigneeId !== undefined) {
+    const newAssignee = new mongoose.Types.ObjectId(assigneeId);
+    if (!actionItem.assigneeId || actionItem.assigneeId.toString() !== newAssignee.toString()) {
+      actionItem.assigneeId = newAssignee;
+      changed = true;
+    }
+  }
+  if (dueDate !== undefined) {
+    const newDate = new Date(dueDate);
+    if (!actionItem.dueDate || actionItem.dueDate.getTime() !== newDate.getTime()) {
+      actionItem.dueDate = newDate;
+      changed = true;
+    }
+  }
+  if (completed !== undefined && actionItem.completed !== completed) {
+    actionItem.completed = completed;
+    changed = true;
+  }
+
+  if (changed) {
+    meeting.markModified('actionItems');
+    meeting.actionItems = actionItems;
+    await meeting.save();
+  }
 
   sendSuccess(res, { actionItem });
 });

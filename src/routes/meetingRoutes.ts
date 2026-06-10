@@ -43,6 +43,6 @@ router.post('/reminder', sendMeetingReminder);
 router.post('/timeline', addTimelineEvent);
 router.post('/files', addSharedFile);
 router.post('/action-items', addActionItem);
-router.patch('/action-items', updateActionItem);
+router.patch('/:meetingId/action-items/:actionId', updateActionItem);
 
 export default router;

@@ -2,7 +2,7 @@ import http from 'http';
 import createApp from './app';
 import { config } from './config';
 import { connectDatabase } from './config/database';
-import { initializeSocket } from './socket';
+import { initializeSocket, setIO } from './socket';
 import { initAdminUser } from './controllers/authController';
 
 const startServer = async (): Promise<void> => {
@@ -14,6 +14,7 @@ const startServer = async (): Promise<void> => {
     const server = http.createServer(app);
 
     const io = initializeSocket(server);
+    setIO(io);
     console.log('🔌 Socket.IO 实时通信已初始化');
 
     server.listen(config.port, () => {

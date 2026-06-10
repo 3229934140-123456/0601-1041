@@ -7,6 +7,8 @@ import {
   getDashboardStats,
   generateCollaborationSummary,
   getActivityTypes,
+  getActivityTimeline,
+  exportActivityLogs,
 } from '../controllers/analyticsController';
 
 const router = Router();
@@ -15,6 +17,8 @@ router.use(protect);
 
 router.get('/activity-types', getActivityTypes);
 router.get('/logs', getActivityLogs);
+router.get('/activity-timeline', getActivityTimeline);
+router.get('/export', exportActivityLogs);
 router.get('/user/:userId/history', getUserActivityHistory);
 router.get('/heatmap', getSpaceHeatmap);
 router.get('/dashboard', getDashboardStats);

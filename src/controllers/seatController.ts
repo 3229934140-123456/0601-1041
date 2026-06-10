@@ -178,6 +178,29 @@ export const assignSeat = asyncHandler(async (req: Request, res: Response, next:
     metadata: { assignedUserId: userId },
   });
 
+  try {
+    const { default: NotificationService } = await import('../services/NotificationService');
+    await NotificationService.create({
+      userId,
+      type: 'seat_assigned',
+      priority: 'normal',
+      title: `您被分配了新座位: ${seat.name}`,
+      content: `座位位于 ${seat.roomId ? '指定房间' : '公共区域'}，类型: ${seat.type === 'fixed' ? '固定工位' : '热座'}`,
+      entityType: 'seat',
+      entityId: seat._id,
+      spaceId: seat.roomId,
+      roomId: seat.roomId,
+      actorUserId: req.user!._id,
+      actionUrl: `/seats/${seat._id}`,
+      metadata: {
+        seatName: seat.name,
+        seatType: seat.type,
+      },
+    });
+  } catch (_e) {
+    // 通知失败忽略
+  }
+
   sendSuccess(res, { seat });
 });
 
@@ -264,34 +287,56 @@ export const occupySeat = asyncHandler(async (req: Request, res: Response, next:
 
 export const releaseSeat = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
   const { seatId } = req.body;
-  const userId = req.user!._id;
+  const operatorUserId = req.user!._id;
 
   const seat = await Seat.findById(seatId);
   if (!seat) {
     return next(new AppError('座位不存在', 404));
   }
 
-  if (!seat.occupiedBy || seat.occupiedBy.toString() !== userId.toString()) {
-    if (req.user!.role !== 'admin' && req.user!.role !== 'moderator') {
-      return next(new AppError('您没有权限释放此座位', 403));
-    }
+  if (!seat.occupiedBy) {
+    return next(new AppError('该座位当前无人占用', 400));
+  }
+
+  const targetUserId = seat.occupiedBy;
+  const isSelf = targetUserId.toString() === operatorUserId.toString();
+
+  if (!isSelf && req.user!.role !== 'admin' && req.user!.role !== 'moderator') {
+    return next(new AppError('您没有权限释放此座位', 403));
   }
 
   seat.occupiedBy = undefined;
   seat.status = seat.assignedUserId ? 'reserved' : 'available';
   await seat.save();
 
-  await User.findByIdAndUpdate(userId, {
-    $unset: { currentSeatId: '' },
+  await User.findByIdAndUpdate(targetUserId, {
+    $unset: {
+      currentSeatId: '',
+      currentRoomId: '',
+      currentSpaceId: '',
+    },
   });
 
+  const UserSocket = (await import('../socket')).onlineUsers;
+  const targetOnline = UserSocket.get(targetUserId.toString());
+  if (targetOnline) {
+    targetOnline.currentSeatId = undefined;
+    targetOnline.currentRoomId = undefined;
+  }
+
   await ActivityLogger.log({
-    userId: userId as any,
+    userId: operatorUserId as any,
     type: 'seat_release',
     entityType: 'seat',
     entityId: seat._id as any,
     roomId: seat.roomId as any,
-    description: `${req.user!.displayName} 释放座位: ${seat.name}`,
+    description: isSelf
+      ? `${req.user!.displayName} 释放座位: ${seat.name}`
+      : `${req.user!.displayName} (管理员) 释放了 ${targetUserId} 的座位: ${seat.name}`,
+    metadata: {
+      targetUserId: targetUserId.toString(),
+      isAdminAction: !isSelf,
+    },
   });
 
   sendSuccess(res, { seat });
